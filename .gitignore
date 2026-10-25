@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.claude/
+HEATSHIFT_BUILD.md
+CLAUDE.md
+*.log
+.env*
+.vscode/
