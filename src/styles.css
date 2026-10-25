@@ -179,7 +179,9 @@ h1, h2, h3 { line-height: 1.2; margin: 0; }
 /* form bits */
 .field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
 .field-row { display: flex; align-items: center; gap: 10px; }
-.field input[type='range'] { accent-color: var(--cool); width: 100%; }
+.field input[type='range'] { accent-color: var(--cool); width: 100%; flex: 1; min-width: 0; }
+.slider-value { min-width: 40px; text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; }
+.same-note { margin: -6px 0 0; }
 .field input[type='number'], select {
   background: var(--card-2);
   border: 1px solid var(--border);

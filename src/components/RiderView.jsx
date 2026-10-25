@@ -1,15 +1,14 @@
 import { useMemo, useState } from 'react';
 import { MapContainer, TileLayer, Polyline, CircleMarker, Tooltip, useMapEvents } from 'react-leaflet';
 import Legend from './Legend.jsx';
-import { weatherAt } from '../lib/weather.js';
-import { segmentWBGT, rampColor, STRAIN_LIMIT, REST_MINUTES } from '../lib/heat.js';
+import { weatherAt, HEATWAVE_PROFILE } from '../lib/weather.js';
+import { segmentWBGT, rampColor, strainFor, STRAIN_LIMIT, REST_MINUTES } from '../lib/heat.js';
 import { BOUNDS, TILE_PROPS } from '../lib/map.js';
 import {
   nodes,
   edges,
   hubs,
   restPoints,
-  dijkstra,
   pathTo,
   pathGeom,
   nearestNode,
@@ -18,26 +17,55 @@ import {
   fastestCost,
   coolestCost,
   streetsNear,
-  DEFAULT_LAMBDA,
 } from '../lib/graph.js';
 
 const HEAT_COLORS = ['#38bdf8', '#a3e635', '#facc15', '#f59e0b', '#ef4444', '#b91c1c'];
 const fastestArr = Float64Array.from(edges, fastestCost);
 
-const DEFAULT_ORIGIN = hubs[0].node;
-const DEFAULT_DEST = (() => {
-  const tree = dijkstra(DEFAULT_ORIGIN, fastestArr);
-  let best = DEFAULT_ORIGIN;
-  let bd = Infinity;
-  for (let i = 0; i < nodes.length; i++) {
-    const d = Math.abs(tree.dist[i] - 15);
-    if (Number.isFinite(tree.dist[i]) && d < bd) {
-      bd = d;
-      best = i;
+const RIDER_DEFAULT_LAMBDA = 1.0;
+const DEFAULT_TRIP_HOUR = 14;
+const TRIP_MIN_MINUTES = 8;
+const TRIP_MAX_MINUTES = 20;
+const MAX_EXTRA_MINUTES = 5;
+const DOSE_MAX = 600;
+
+// Cumulative heat strain from the tree's source to every node.
+function treeStrain(tree, strainArr) {
+  const order = Array.from(nodes.keys())
+    .filter((n) => Number.isFinite(tree.dist[n]))
+    .sort((a, b) => tree.dist[a] - tree.dist[b]);
+  const out = new Float64Array(nodes.length).fill(Infinity);
+  for (const n of order) out[n] = n === tree.src ? 0 : out[tree.prevNode[n]] + strainArr[tree.prevEdge[n]];
+  return out;
+}
+
+// Default trip: the hub → destination pair (8–20 min fastest) with the largest
+// heat-strain reduction at 14:00 on the Heatwave Day, for at most 5 extra minutes.
+let defaultTripCache = null;
+function getDefaultTrip() {
+  if (defaultTripCache) return defaultTripCache;
+  const w = weatherAt(HEATWAVE_PROFILE, DEFAULT_TRIP_HOUR);
+  const scope = `${HEATWAVE_PROFILE.id}|${HEATWAVE_PROFILE.date}|${RIDER_DEFAULT_LAMBDA}`;
+  const strainArr = Float64Array.from(edges, (e) => strainFor(e, w, e.minutes));
+  const coolArr = Float64Array.from(edges, coolestCost(w, RIDER_DEFAULT_LAMBDA));
+  let best = null;
+  let fallback = null;
+  for (const h of hubs) {
+    const ft = cachedTree(scope, 'fastest', 0, h.node, () => fastestArr);
+    const ct = cachedTree(scope, 'coolest', DEFAULT_TRIP_HOUR, h.node, () => coolArr);
+    const sf = treeStrain(ft, strainArr);
+    const sc = treeStrain(ct, strainArr);
+    for (let n = 0; n < nodes.length; n++) {
+      if (!(ft.dist[n] >= TRIP_MIN_MINUTES && ft.dist[n] <= TRIP_MAX_MINUTES) || !(sf[n] > 0)) continue;
+      if (!fallback) fallback = { origin: h.node, dest: n };
+      if (ct.minutes[n] - ft.minutes[n] > MAX_EXTRA_MINUTES) continue;
+      const reduction = 1 - sc[n] / sf[n];
+      if (!best || reduction > best.reduction) best = { origin: h.node, dest: n, reduction };
     }
   }
-  return best;
-})();
+  defaultTripCache = best || fallback || { origin: hubs[0].node, dest: hubs[1].node };
+  return defaultTripCache;
+}
 
 function placeName(node) {
   const hub = hubs.find((h) => h.node === node);
@@ -54,6 +82,29 @@ function ClickHandler({ onClick }) {
 }
 
 const fmt1 = (x) => x.toFixed(1);
+
+const COOL_STYLE = { color: '#38bdf8', weight: 6, opacity: 0.95 };
+const FAST_STYLE = { color: '#ffffff', weight: 5, opacity: 0.95, dashArray: '8 8' };
+const REST_STYLE = { color: '#14532d', weight: 2, fillColor: '#22c55e', fillOpacity: 0.95 };
+const HUB_STYLE = { color: '#7c2d12', weight: 2, fillColor: '#f97316', fillOpacity: 0.95 };
+const START_STYLE = { color: '#fff', weight: 3, fillColor: '#0f1115', fillOpacity: 1 };
+const DROP_STYLE = { color: '#38bdf8', weight: 3, fillColor: '#0f1115', fillOpacity: 1 };
+
+// Static map layers, built once so slider drags don't restyle them.
+const POI_LAYER = (
+  <>
+    {restPoints.map((p) => (
+      <CircleMarker key={`r${p.node}${p.name}`} center={[p.lat, p.lon]} radius={6} pathOptions={REST_STYLE}>
+        <Tooltip>{p.label} · rest point</Tooltip>
+      </CircleMarker>
+    ))}
+    {hubs.map((h) => (
+      <CircleMarker key={`h${h.node}${h.name}`} center={[h.lat, h.lon]} radius={7} pathOptions={HUB_STYLE}>
+        <Tooltip>{h.label} · pickup hub</Tooltip>
+      </CircleMarker>
+    ))}
+  </>
+);
 
 function RouteCard({ kind, title, stats }) {
   return (
@@ -88,10 +139,10 @@ const NUDGE = {
 };
 
 export default function RiderView({ weather, hour }) {
-  const [origin, setOrigin] = useState(DEFAULT_ORIGIN);
-  const [dest, setDest] = useState(DEFAULT_DEST);
+  const [origin, setOrigin] = useState(() => getDefaultTrip().origin);
+  const [dest, setDest] = useState(() => getDefaultTrip().dest);
   const [clicks, setClicks] = useState(0);
-  const [lambda, setLambda] = useState(DEFAULT_LAMBDA);
+  const [lambda, setLambda] = useState(RIDER_DEFAULT_LAMBDA);
   const [soFar, setSoFar] = useState(320);
   const [lang, setLang] = useState('en-IN');
   const [voiceNote, setVoiceNote] = useState('');
@@ -107,6 +158,13 @@ export default function RiderView({ weather, hour }) {
     stops[stops.length - 1].label = hi.toFixed(1);
     return { colors: vals.map((v) => rampColor(stops, v)), stops };
   }, [w]);
+  const edgeLayer = useMemo(
+    () =>
+      edges.map((e, i) => (
+        <Polyline key={i} positions={e.geom} interactive={false} pathOptions={{ color: heatMap.colors[i], weight: 2, opacity: 0.8 }} />
+      )),
+    [heatMap],
+  );
 
   const handleClick = (node) => {
     if (clicks === 0) {
@@ -117,8 +175,8 @@ export default function RiderView({ weather, hour }) {
       setDest(node);
       setClicks(2);
     } else {
-      setOrigin(DEFAULT_ORIGIN);
-      setDest(DEFAULT_DEST);
+      setOrigin(getDefaultTrip().origin);
+      setDest(getDefaultTrip().dest);
       setClicks(0);
     }
   };
@@ -143,6 +201,36 @@ export default function RiderView({ weather, hour }) {
     };
   }, [fastTree, coolTree, dest, origin, w]);
 
+  const routeLayer = useMemo(
+    () =>
+      routes && (
+        <>
+          <Polyline positions={routes.cool.geom} interactive={false} pathOptions={COOL_STYLE} />
+          <Polyline positions={routes.fast.geom} interactive={false} pathOptions={FAST_STYLE} />
+        </>
+      ),
+    [routes],
+  );
+  const endpointLayer = useMemo(
+    () => (
+      <>
+        <CircleMarker center={nodes[origin]} radius={9} pathOptions={START_STYLE}>
+          <Tooltip permanent direction="top">
+            Start
+          </Tooltip>
+        </CircleMarker>
+        {dest != null && (
+          <CircleMarker center={nodes[dest]} radius={9} pathOptions={DROP_STYLE}>
+            <Tooltip permanent direction="top">
+              Drop
+            </Tooltip>
+          </CircleMarker>
+        )}
+      </>
+    ),
+    [origin, dest],
+  );
+
   const rest = useMemo(() => {
     let best = null;
     for (const p of restPoints) {
@@ -153,7 +241,7 @@ export default function RiderView({ weather, hour }) {
   }, [coolTree]);
 
   const routeStrain = routes ? routes.cool.stats.strain : 0;
-  const total = (Number(soFar) || 0) + routeStrain;
+  const total = soFar + routeStrain;
   const needsRest = routes && total > STRAIN_LIMIT && rest;
   const restMin = rest ? Math.max(1, Math.round(rest.minutes)) : 0;
   const nudgeText = needsRest ? NUDGE[lang](rest.point.label, restMin) : '';
@@ -176,7 +264,7 @@ export default function RiderView({ weather, hour }) {
   };
 
   const pct = Math.min(100, (total / STRAIN_LIMIT) * 100);
-  const soFarPct = Math.min(100, ((Number(soFar) || 0) / STRAIN_LIMIT) * 100);
+  const soFarPct = Math.min(100, (soFar / STRAIN_LIMIT) * 100);
   const deltaMin = routes ? routes.cool.stats.minutes - routes.fast.stats.minutes : 0;
   const deltaStrain = routes && routes.fast.stats.strain > 0 ? (1 - routes.cool.stats.strain / routes.fast.stats.strain) * 100 : 0;
   const hint = clicks === 0 ? 'Click the map to set a new origin' : clicks === 1 ? 'Click to set the destination' : 'Click again to reset';
@@ -191,41 +279,10 @@ export default function RiderView({ weather, hour }) {
           <MapContainer className="map" bounds={BOUNDS} maxZoom={19} preferCanvas scrollWheelZoom>
             <TileLayer {...TILE_PROPS} />
             <ClickHandler onClick={handleClick} />
-            {edges.map((e, i) => (
-              <Polyline key={i} positions={e.geom} interactive={false} pathOptions={{ color: heatMap.colors[i], weight: 2, opacity: 0.8 }} />
-            ))}
-            {routes && (
-              <>
-                <Polyline positions={routes.cool.geom} interactive={false} pathOptions={{ color: '#38bdf8', weight: 6, opacity: 0.95 }} />
-                <Polyline
-                  positions={routes.fast.geom}
-                  interactive={false}
-                  pathOptions={{ color: '#ffffff', weight: 5, opacity: 0.95, dashArray: '8 8' }}
-                />
-              </>
-            )}
-            {restPoints.map((p) => (
-              <CircleMarker key={`r${p.node}${p.name}`} center={[p.lat, p.lon]} radius={6} pathOptions={{ color: '#14532d', weight: 2, fillColor: '#22c55e', fillOpacity: 0.95 }}>
-                <Tooltip>{p.label} · rest point</Tooltip>
-              </CircleMarker>
-            ))}
-            {hubs.map((h) => (
-              <CircleMarker key={`h${h.node}${h.name}`} center={[h.lat, h.lon]} radius={7} pathOptions={{ color: '#7c2d12', weight: 2, fillColor: '#f97316', fillOpacity: 0.95 }}>
-                <Tooltip>{h.label} · pickup hub</Tooltip>
-              </CircleMarker>
-            ))}
-            <CircleMarker center={nodes[origin]} radius={9} pathOptions={{ color: '#fff', weight: 3, fillColor: '#0f1115', fillOpacity: 1 }}>
-              <Tooltip permanent direction="top">
-                Start
-              </Tooltip>
-            </CircleMarker>
-            {dest != null && (
-              <CircleMarker center={nodes[dest]} radius={9} pathOptions={{ color: '#38bdf8', weight: 3, fillColor: '#0f1115', fillOpacity: 1 }}>
-                <Tooltip permanent direction="top">
-                  Drop
-                </Tooltip>
-              </CircleMarker>
-            )}
+            {edgeLayer}
+            {routeLayer}
+            {POI_LAYER}
+            {endpointLayer}
           </MapContainer>
         </div>
         <Legend
@@ -261,6 +318,7 @@ export default function RiderView({ weather, hour }) {
             </div>
             <RouteCard kind="fast" title="⚡ Fastest route" stats={routes.fast.stats} />
             <RouteCard kind="cool" title="❄ Coolest route" stats={routes.cool.stats} />
+            {routes.same && <p className="tiny muted same-note">No cooler alternative on this trip.</p>}
           </>
         ) : (
           <div className="card muted small">Pick a destination on the map to compare routes.</div>
@@ -268,11 +326,13 @@ export default function RiderView({ weather, hour }) {
 
         <div className="card">
           <div className="field">
-            <div className="field-row" style={{ justifyContent: 'space-between' }}>
-              <span>Heat avoidance (λ)</span>
-              <b>{lambda.toFixed(1)}</b>
+            <label htmlFor="lambda">Heat avoidance (λ)</label>
+            <div className="field-row">
+              <input id="lambda" type="range" min="0" max="2" step="0.1" value={lambda} onChange={(e) => setLambda(Number(e.target.value))} />
+              <output htmlFor="lambda" className="slider-value">
+                {lambda.toFixed(1)}
+              </output>
             </div>
-            <input type="range" min="0" max="2" step="0.1" value={lambda} onChange={(e) => setLambda(Number(e.target.value))} />
             <span className="tiny muted">Cost per street = minutes + λ × heat strain. λ = 0 gives the fastest route.</span>
           </div>
         </div>
@@ -280,10 +340,13 @@ export default function RiderView({ weather, hour }) {
         <div className="card">
           <h3>Shift dose meter</h3>
           <div className="field">
-            <label className="field-row">
-              <span>Strain accumulated so far (HSI)</span>
-              <input type="number" min="0" step="10" value={soFar} onChange={(e) => setSoFar(e.target.value)} />
-            </label>
+            <label htmlFor="dose">Strain accumulated so far (HSI)</label>
+            <div className="field-row">
+              <input id="dose" type="range" min="0" max={DOSE_MAX} step="5" value={soFar} onChange={(e) => setSoFar(Number(e.target.value))} />
+              <output htmlFor="dose" className="slider-value">
+                {soFar}
+              </output>
+            </div>
             <div className="progress" aria-label="Heat strain against safe limit">
               <span
                 style={{
@@ -293,7 +356,7 @@ export default function RiderView({ weather, hour }) {
               />
             </div>
             <span className="tiny muted">
-              {Math.round(Number(soFar) || 0)} so far + {Math.round(routeStrain)} on the coolest route = <b>{Math.round(total)}</b> / {STRAIN_LIMIT} HSI limit
+              {soFar} so far + {Math.round(routeStrain)} on the coolest route = <b>{Math.round(total)}</b> / {STRAIN_LIMIT} HSI limit
             </span>
           </div>
           <div style={{ marginTop: 12 }}>
