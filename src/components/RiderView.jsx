@@ -103,8 +103,8 @@ export default function RiderView({ weather, hour }) {
     const lo = Math.min(...vals);
     const hi = Math.max(...vals);
     const stops = HEAT_COLORS.map((color, i) => ({ at: lo + ((hi - lo) * i) / (HEAT_COLORS.length - 1), color }));
-    stops[0].label = `${lo.toFixed(1)} °C`;
-    stops[stops.length - 1].label = `${hi.toFixed(1)} °C`;
+    stops[0].label = lo.toFixed(1);
+    stops[stops.length - 1].label = hi.toFixed(1);
     return { colors: vals.map((v) => rampColor(stops, v)), stops };
   }, [w]);
 
@@ -229,7 +229,7 @@ export default function RiderView({ weather, hour }) {
           </MapContainer>
         </div>
         <Legend
-          ramp={{ title: `Street WBGT at ${String(Math.floor(hour)).padStart(2, '0')}:00`, stops: heatMap.stops }}
+          ramp={{ title: `Street Heat Index (°C) at ${String(Math.floor(hour)).padStart(2, '0')}:00`, stops: heatMap.stops }}
           items={[
             { kind: 'line', color: '#ffffff', dashed: true, label: 'Fastest' },
             { kind: 'line', color: '#38bdf8', label: 'Coolest' },

@@ -59,7 +59,7 @@ export default function App() {
             </button>
           </div>
           <span className="chip">
-            <b>{w.temp.toFixed(1)} °C</b> · RH {Math.round(w.rh)}% · WBGT <b>{wbgt(w.temp, w.rh).toFixed(1)} °C</b>
+            <b>{w.temp.toFixed(1)} °C</b> · RH {Math.round(w.rh)}% · Street Heat Index (°C) <b>{wbgt(w.temp, w.rh).toFixed(1)}</b>
           </span>
           <label className="hour">
             Hour

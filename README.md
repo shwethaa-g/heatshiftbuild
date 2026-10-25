@@ -54,6 +54,8 @@ WBGT = 0.567·T + 0.393·e + 3.94
 T_street = T_air + uhi + (radiation/1000) · 7 · (1 − shade)
 ```
 
+In the app this street-level value is labelled **Street Heat Index (°C)**: it is WBGT-based (BoM approximation) with an added solar-exposure term for unshaded radiation, plus the street's urban heat island offset. The conditions chip in the header shows the same index for open air at the selected hour, without the street shade, solar or UHI terms.
+
 **Shade and UHI from OSM**, computed per segment by sampling its midpoint and a point every ~40 m:
 
 - `treeScore` = trees / tree-row centres within 35 m, plus 3 if within 60 m of a park, grass or wood. Normalised as `min(1, score/6)`.
